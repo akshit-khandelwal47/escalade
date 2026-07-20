@@ -29,3 +29,10 @@ management:
   endpoint:
     health:
       show-details: when_authorized
+
+escalade:
+  worker:
+    # Set false to stop the background poller (tests drive the engine directly).
+    scheduler-enabled: ${ESCALADE_WORKER_ENABLED:true}
+    poll-interval-ms: ${ESCALADE_WORKER_POLL_MS:1000}
+    batch-size: ${ESCALADE_WORKER_BATCH:50}
