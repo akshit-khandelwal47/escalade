@@ -18,6 +18,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -28,6 +29,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * and the OPEN -> ACKNOWLEDGED state transition halting escalation.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@TestPropertySource(properties = "escalade.worker.scheduler-enabled=false")
 @Testcontainers
 class IncidentApiIntegrationTest {
 
