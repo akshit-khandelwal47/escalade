@@ -38,5 +38,13 @@ public final class IncidentDtos {
             AttemptStatus status,
             int attemptCount,
             Instant dueAt,
-            Instant sentAt) {}
+            Instant sentAt,
+            String lastError) {}
+
+    public record DeadLetterResponse(
+            UUID id,
+            UUID incidentId,
+            UUID notificationAttemptId,
+            String reason,
+            Instant failedAt) {}
 }

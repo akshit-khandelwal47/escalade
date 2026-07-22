@@ -45,13 +45,17 @@ public class IncidentWriter {
     }
 
     /**
-     * Acknowledge and halt escalation. Throws {@code ObjectOptimisticLockingFailureException} on
-     * commit if the worker advanced this incident's step concurrently; the caller retries.
+     * Acknowledge and halt escalation. Throws {@code OptimisticLockingFailureException} on commit if
+     * the worker advanced this incident's step concurrently; the caller retries.
+     */
+    /**
+     * Acknowledge and halt escalation. Also accepted on a DEAD_LETTERED incident: escalation having
+     * given up does not mean a human arriving late should be turned away.
      */
     @Transactional
     public Incident acknowledge(UUID orgId, UUID id) {
         Incident incident = load(orgId, id);
-        if (incident.getStatus() != IncidentStatus.OPEN) {
+        if (incident.getStatus() != IncidentStatus.OPEN && incident.getStatus() != IncidentStatus.DEAD_LETTERED) {
             throw new ConflictException("Cannot acknowledge an incident in status " + incident.getStatus());
         }
         incident.setStatus(IncidentStatus.ACKNOWLEDGED);
