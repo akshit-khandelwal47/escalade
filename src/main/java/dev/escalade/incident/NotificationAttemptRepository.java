@@ -13,10 +13,13 @@ public interface NotificationAttemptRepository extends JpaRepository<Notificatio
     List<NotificationAttempt> findByIncidentIdOrderByStepOrderAscCreatedAtAsc(UUID incidentId);
 
     /**
-     * Claim a batch of due attempts for this worker. {@code FOR UPDATE SKIP LOCKED} lets several
-     * worker instances poll the same table concurrently: each locks a disjoint set and skips rows
-     * another worker already holds, so no attempt is processed twice — no external broker required.
-     * Must be called within a transaction; locks are held until it commits.
+     * Claims the oldest due attempts, up to {@code limit}. {@code FOR UPDATE SKIP LOCKED} lets
+     * several worker instances poll the same table concurrently: each locks a disjoint set and skips
+     * rows another worker already holds, so no attempt is processed twice — no external broker
+     * required. Must be called within a transaction; locks are held until it commits.
+     *
+     * <p>The worker calls this with {@code limit = 1}: each attempt gets its own transaction so a
+     * lost optimistic-lock race cannot roll back attempts that were already delivered.
      */
     @Query(value = """
             SELECT * FROM notification_attempt
