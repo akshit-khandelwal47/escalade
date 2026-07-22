@@ -36,3 +36,5 @@ escalade:
     scheduler-enabled: ${ESCALADE_WORKER_ENABLED:true}
     poll-interval-ms: ${ESCALADE_WORKER_POLL_MS:1000}
     batch-size: ${ESCALADE_WORKER_BATCH:50}
+    # Demo aid: widens the delivery window so the ack-vs-escalation race is reproducible by hand.
+    simulated-send-delay-ms: ${ESCALADE_SIMULATED_SEND_DELAY_MS:0}
