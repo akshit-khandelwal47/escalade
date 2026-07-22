@@ -2,6 +2,8 @@ package dev.escalade.worker;
 
 import dev.escalade.channel.NotificationDispatcher;
 import dev.escalade.incident.AttemptStatus;
+import dev.escalade.incident.DeadLetter;
+import dev.escalade.incident.DeadLetterRepository;
 import dev.escalade.incident.Incident;
 import dev.escalade.incident.IncidentRepository;
 import dev.escalade.incident.IncidentStatus;
@@ -13,6 +15,7 @@ import java.time.Instant;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -33,14 +36,25 @@ public class EscalationStepProcessor {
     private final NotificationAttemptRepository attempts;
     private final IncidentRepository incidents;
     private final StepRepository steps;
+    private final DeadLetterRepository deadLetters;
     private final NotificationDispatcher dispatcher;
+    private final int maxAttempts;
+    private final long backoffSeconds;
+    private final long maxBackoffSeconds;
 
     public EscalationStepProcessor(NotificationAttemptRepository attempts, IncidentRepository incidents,
-            StepRepository steps, NotificationDispatcher dispatcher) {
+            StepRepository steps, DeadLetterRepository deadLetters, NotificationDispatcher dispatcher,
+            @Value("${escalade.worker.max-attempts:3}") int maxAttempts,
+            @Value("${escalade.worker.retry-backoff-seconds:30}") long backoffSeconds,
+            @Value("${escalade.worker.retry-max-backoff-seconds:900}") long maxBackoffSeconds) {
         this.attempts = attempts;
         this.incidents = incidents;
         this.steps = steps;
+        this.deadLetters = deadLetters;
         this.dispatcher = dispatcher;
+        this.maxAttempts = maxAttempts;
+        this.backoffSeconds = backoffSeconds;
+        this.maxBackoffSeconds = maxBackoffSeconds;
     }
 
     /**
@@ -72,26 +86,65 @@ public class EscalationStepProcessor {
             dispatcher.dispatch(incident, attempt);
             attempt.setStatus(AttemptStatus.SENT);
             attempt.setSentAt(now);
+            attempt.setLastError(null);
             scheduleNextStep(incident, attempt, now);
         } catch (Exception e) {
-            attempt.setStatus(AttemptStatus.FAILED);
-            attempt.setLastError(e.getMessage());
-            log.warn("delivery failed for attempt {} (incident {}): {}",
-                    attempt.getId(), incident.getId(), e.getMessage());
-            // Retry with backoff + dead-lettering land in a later phase.
+            handleDeliveryFailure(incident, attempt, now, e);
         }
     }
 
-    private void scheduleNextStep(Incident incident, NotificationAttempt sent, Instant now) {
-        int nextOrder = sent.getStepOrder() + 1;
+    /**
+     * Retries with exponential backoff until {@code max-attempts}, then dead-letters.
+     *
+     * <p>Dead-lettering does <em>not</em> stop the escalation: the ladder continues to the next step.
+     * A channel outage must not silently prevent anyone from being paged — that is the entire reason
+     * a policy has more than one step. The failure becomes a queryable {@code dead_letter} row rather
+     * than a swallowed exception.
+     */
+    private void handleDeliveryFailure(Incident incident, NotificationAttempt attempt, Instant now, Exception e) {
+        String error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+        attempt.setLastError(error);
+
+        if (attempt.getAttemptCount() < maxAttempts) {
+            attempt.setStatus(AttemptStatus.PENDING);
+            attempt.setDueAt(now.plusSeconds(backoffFor(attempt.getAttemptCount())));
+            log.warn("delivery failed for attempt {} (incident {}), retry {}/{} due at {}: {}",
+                    attempt.getId(), incident.getId(), attempt.getAttemptCount(), maxAttempts,
+                    attempt.getDueAt(), error);
+            return;
+        }
+
+        attempt.setStatus(AttemptStatus.FAILED);
+        deadLetters.save(new DeadLetter(attempt.getId(), incident.getId(),
+                "Delivery failed after " + attempt.getAttemptCount() + " attempt(s): " + error));
+        log.error("dead-lettered attempt {} (incident {}) after {} attempt(s): {}",
+                attempt.getId(), incident.getId(), attempt.getAttemptCount(), error);
+
+        // Keep escalating regardless — the next channel may still reach someone.
+        scheduleNextStep(incident, attempt, now);
+    }
+
+    /** Exponential backoff: base, 2x base, 4x base … capped. */
+    private long backoffFor(int attemptCount) {
+        long factor = 1L << Math.min(attemptCount - 1, 16);
+        return Math.min(backoffSeconds * factor, maxBackoffSeconds);
+    }
+
+    private void scheduleNextStep(Incident incident, NotificationAttempt finished, Instant now) {
+        int nextOrder = finished.getStepOrder() + 1;
         EscalationStep next = steps.findByPolicyIdOrderByStepOrder(incident.getPolicyId()).stream()
                 .filter(s -> s.getStepOrder() == nextOrder)
                 .findFirst()
                 .orElse(null);
 
         if (next == null) {
+            // Policy exhausted and still unacknowledged. Stamp the time; the sweeper flips the
+            // incident to DEAD_LETTERED once the grace period passes, so a late ack still works.
+            if (incident.getEscalationExhaustedAt() == null) {
+                incident.setEscalationExhaustedAt(now);
+            }
             log.info("incident {} exhausted all {} step(s) unacknowledged",
-                    incident.getId(), sent.getStepOrder() + 1);
+                    incident.getId(), finished.getStepOrder() + 1);
             return;
         }
 
