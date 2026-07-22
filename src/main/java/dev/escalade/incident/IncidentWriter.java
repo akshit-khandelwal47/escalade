@@ -1,5 +1,7 @@
 package dev.escalade.incident;
 
+import dev.escalade.common.ConflictException;
+import dev.escalade.common.NotFoundException;
 import dev.escalade.incident.IncidentDtos.CreateIncidentRequest;
 import dev.escalade.policy.EscalationStep;
 import java.time.Instant;
@@ -9,11 +11,13 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Owns the single transaction that creates an incident together with its first
- * notification attempt. Kept separate from {@link IncidentService} so that a
- * unique-constraint violation on the dedup index rolls back cleanly and the
- * orchestrator can fall back to reading the existing incident in a fresh
- * transaction (a poisoned transaction cannot be read from).
+ * Owns the transactions that mutate an incident.
+ *
+ * <p>Kept separate from {@link IncidentService} for two reasons. Creation: a unique-constraint
+ * violation on the dedup index must roll back cleanly so the orchestrator can read the existing
+ * incident in a fresh transaction. Transitions: each attempt runs in its own transaction so the
+ * orchestrator can retry after an optimistic-lock collision with the escalation worker — a retry
+ * is only meaningful once the failed transaction has been rolled back.
  */
 @Component
 public class IncidentWriter {
@@ -38,5 +42,38 @@ public class IncidentWriter {
                     incident.getId(), first.getStepOrder(), first.getChannel(), first.getTarget(), dueAt));
         }
         return incident;
+    }
+
+    /**
+     * Acknowledge and halt escalation. Throws {@code ObjectOptimisticLockingFailureException} on
+     * commit if the worker advanced this incident's step concurrently; the caller retries.
+     */
+    @Transactional
+    public Incident acknowledge(UUID orgId, UUID id) {
+        Incident incident = load(orgId, id);
+        if (incident.getStatus() != IncidentStatus.OPEN) {
+            throw new ConflictException("Cannot acknowledge an incident in status " + incident.getStatus());
+        }
+        incident.setStatus(IncidentStatus.ACKNOWLEDGED);
+        incident.setAckedAt(Instant.now());
+        attempts.cancelPendingForIncident(id);
+        return incident;
+    }
+
+    @Transactional
+    public Incident resolve(UUID orgId, UUID id) {
+        Incident incident = load(orgId, id);
+        if (incident.getStatus().isTerminal()) {
+            throw new ConflictException("Cannot resolve an incident in status " + incident.getStatus());
+        }
+        incident.setStatus(IncidentStatus.RESOLVED);
+        incident.setResolvedAt(Instant.now());
+        attempts.cancelPendingForIncident(id);
+        return incident;
+    }
+
+    private Incident load(UUID orgId, UUID id) {
+        return incidents.findByIdAndOrgId(id, orgId)
+                .orElseThrow(() -> new NotFoundException("Incident not found: " + id));
     }
 }

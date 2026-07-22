@@ -8,15 +8,21 @@ import dev.escalade.incident.IncidentDtos.IncidentResponse;
 import dev.escalade.policy.EscalationStep;
 import dev.escalade.policy.PolicyRepository;
 import dev.escalade.policy.StepRepository;
-import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class IncidentService {
+
+    private static final Logger log = LoggerFactory.getLogger(IncidentService.class);
+    private static final int MAX_TRANSITION_ATTEMPTS = 3;
 
     private final PolicyRepository policies;
     private final StepRepository steps;
@@ -75,28 +81,35 @@ public class IncidentService {
         return found.stream().map(this::toResponse).toList();
     }
 
-    @Transactional
+    /**
+     * Acknowledging races the escalation worker: the on-call may hit ack in the same instant the
+     * worker is advancing to the next step. The loser of that race is detected by the incident's
+     * optimistic-lock version, and retrying is the correct response — on the retry we re-read the
+     * incident (now one step further along, still OPEN) and acknowledge it for real, cancelling the
+     * step the worker just scheduled. Without this the on-call would see a 500 and keep getting paged.
+     */
     public IncidentResponse acknowledge(UUID orgId, UUID id) {
-        Incident incident = load(orgId, id);
-        if (incident.getStatus() != IncidentStatus.OPEN) {
-            throw new ConflictException("Cannot acknowledge an incident in status " + incident.getStatus());
-        }
-        incident.setStatus(IncidentStatus.ACKNOWLEDGED);
-        incident.setAckedAt(Instant.now());
-        attempts.cancelPendingForIncident(incident.getId());
-        return toResponse(incident);
+        return toResponse(withRetryOnCollision(() -> writer.acknowledge(orgId, id)));
     }
 
-    @Transactional
     public IncidentResponse resolve(UUID orgId, UUID id) {
-        Incident incident = load(orgId, id);
-        if (incident.getStatus().isTerminal()) {
-            throw new ConflictException("Cannot resolve an incident in status " + incident.getStatus());
+        return toResponse(withRetryOnCollision(() -> writer.resolve(orgId, id)));
+    }
+
+    private Incident withRetryOnCollision(Supplier<Incident> transition) {
+        for (int attempt = 1; attempt <= MAX_TRANSITION_ATTEMPTS; attempt++) {
+            try {
+                return transition.get();
+            } catch (ObjectOptimisticLockingFailureException collision) {
+                log.info("incident {} was modified concurrently, retrying transition ({}/{})",
+                        id(collision), attempt, MAX_TRANSITION_ATTEMPTS);
+            }
         }
-        incident.setStatus(IncidentStatus.RESOLVED);
-        incident.setResolvedAt(Instant.now());
-        attempts.cancelPendingForIncident(incident.getId());
-        return toResponse(incident);
+        throw new ConflictException("Incident is being modified concurrently; please retry");
+    }
+
+    private static Object id(ObjectOptimisticLockingFailureException e) {
+        return e.getIdentifier() != null ? e.getIdentifier() : "unknown";
     }
 
     private Incident load(UUID orgId, UUID id) {
