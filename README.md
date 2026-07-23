@@ -5,10 +5,10 @@ channel, after how long, and what happens when nobody acknowledges*. Built to de
 delivery-guarantee mechanics that make an alerting system trustworthy, not just a CRUD wrapper
 over a `notifications` table.
 
-> **Status:** Phases 0–5 complete (schema, policy + incident CRUD, idempotent dedup, API-key auth,
+> **Status:** Phases 0–6 complete (schema, policy + incident CRUD, idempotent dedup, API-key auth,
 > the background escalation worker with `SKIP LOCKED` job claiming, optimistic-locked
-> acknowledgement, and retry/backoff with an explicit dead-letter path). Real Slack/email channels
-> land next — see [Roadmap](#roadmap).
+> acknowledgement, retry/backoff with an explicit dead-letter path, and real Slack + email
+> transports). See [Roadmap](#roadmap).
 
 ## Why this is interesting
 
@@ -79,6 +79,30 @@ curl -s -X POST localhost:8080/api/v1/incidents \
 # 3. Fire the SAME dedupKey again — returns the same incident (HTTP 200, not 201). No duplicate page.
 ```
 
+## Notification channels
+
+| Channel | Transport | Activates when |
+|---|---|---|
+| `SLACK` | Slack incoming webhook | `SLACK_WEBHOOK_URL` is set |
+| `EMAIL` | Resend HTTP API | `RESEND_API_KEY` is set |
+| `WEBHOOK` | — falls back to logging | see note below |
+
+Each transport registers only when its credential is present and non-empty; otherwise that channel
+type falls back to logging the page. Whichever routing is actually in effect is logged at startup, so
+a page that went to a log file instead of Slack is never a silent surprise:
+
+```
+notification routing: EMAIL=EmailNotificationChannel, SLACK=SlackNotificationChannel, WEBHOOK=LoggingNotificationChannel
+```
+
+A step's `target` is the recipient — an email address, or a Slack channel label. A step may also put
+its own `hooks.slack.com` URL in `target` to page a different Slack channel per step.
+
+`WEBHOOK` deliberately has no transport yet. Posting to a tenant-supplied URL is an SSRF sink — a
+tenant could point a step at cloud instance metadata or an internal service — so it needs destination
+validation (scheme, and private/link-local address ranges) before it ships, rather than being added
+because the enum value exists.
+
 ## Roadmap
 
 - [x] **0** Scaffold, Flyway, Docker Compose, Swagger
@@ -87,7 +111,7 @@ curl -s -X POST localhost:8080/api/v1/incidents \
 - [x] **3** Worker loop — `SKIP LOCKED` claiming + step escalation
 - [x] **4** Ack-race handling — optimistic lock + concurrent test
 - [x] **5** Dead-letter path + retry/backoff
-- [ ] **6** Real Slack + email channels
+- [x] **6** Real Slack + email channels
 - [ ] **7** Inbound webhook receiver
 - [ ] **8** Metrics, architecture diagram, demo GIF
 
@@ -104,6 +128,11 @@ curl -s -X POST localhost:8080/api/v1/incidents \
 - **A dead-lettered delivery does not stop escalation.** Exhausting retries on one step records the
   failure and moves to the next step. Halting there would let a single channel outage silently
   prevent anyone from being paged — the opposite of what a policy with multiple steps is for.
+- **Delivery timeouts are a correctness concern, not tuning.** A send runs inside the transaction
+  holding the attempt's row lock, so an unresponsive endpoint would pin that lock and stall the
+  incident's escalation. Connect and read timeouts bound the worst case to a failed attempt that
+  retries. The scale-out fix is to commit an in-flight marker and deliver outside the lock with a
+  visibility timeout to recover crashed workers; bounded timeouts are sufficient while a tick is short.
 - **`DEAD_LETTERED` waits out a grace period.** Marking it the instant the final step fires would make
   the status terminal while the on-call is still reading the page, so the worker stamps
   `escalation_exhausted_at` and a sweeper flips the status later. An acknowledgement is still accepted
