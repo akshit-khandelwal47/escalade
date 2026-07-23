@@ -3,7 +3,7 @@ package dev.escalade.worker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 
 /**
@@ -35,7 +35,7 @@ public class EscalationEngine {
                     break;
                 }
                 processed++;
-            } catch (ObjectOptimisticLockingFailureException collision) {
+            } catch (OptimisticLockingFailureException collision) {
                 // An acknowledge/resolve committed while this step was in flight. The step's
                 // transaction rolled back, so its attempt is PENDING again and the next tick will
                 // re-read the incident, see it is no longer OPEN, and cancel the attempt instead of

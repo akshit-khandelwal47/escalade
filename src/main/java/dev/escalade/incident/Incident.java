@@ -62,6 +62,10 @@ public class Incident {
     @Column(name = "resolved_at")
     private Instant resolvedAt;
 
+    /** Set when the worker delivers the last step of the policy and nothing remains to escalate to. */
+    @Column(name = "escalation_exhausted_at")
+    private Instant escalationExhaustedAt;
+
     public Incident(UUID orgId, UUID policyId, String title, String dedupKey, Map<String, Object> payload) {
         this.orgId = orgId;
         this.policyId = policyId;

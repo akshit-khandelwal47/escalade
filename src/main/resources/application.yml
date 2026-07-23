@@ -35,6 +35,17 @@ escalade:
     # Set false to stop the background poller (tests drive the engine directly).
     scheduler-enabled: ${ESCALADE_WORKER_ENABLED:true}
     poll-interval-ms: ${ESCALADE_WORKER_POLL_MS:1000}
+    # Max attempts processed per tick (each in its own transaction), not a SQL batch size.
     batch-size: ${ESCALADE_WORKER_BATCH:50}
     # Demo aid: widens the delivery window so the ack-vs-escalation race is reproducible by hand.
     simulated-send-delay-ms: ${ESCALADE_SIMULATED_SEND_DELAY_MS:0}
+
+    # Delivery retries: total tries per attempt, then it dead-letters (escalation still continues).
+    max-attempts: ${ESCALADE_MAX_ATTEMPTS:3}
+    retry-backoff-seconds: ${ESCALADE_RETRY_BACKOFF_SECONDS:30}
+    retry-max-backoff-seconds: ${ESCALADE_RETRY_MAX_BACKOFF_SECONDS:900}
+
+    # How long an incident may sit unacknowledged after escalation runs out of steps
+    # before it is marked DEAD_LETTERED, and how often that sweep runs.
+    unacked-grace-seconds: ${ESCALADE_UNACKED_GRACE_SECONDS:300}
+    sweep-interval-ms: ${ESCALADE_SWEEP_INTERVAL_MS:5000}

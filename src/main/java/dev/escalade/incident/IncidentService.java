@@ -4,6 +4,7 @@ import dev.escalade.common.ConflictException;
 import dev.escalade.common.NotFoundException;
 import dev.escalade.incident.IncidentDtos.AttemptResponse;
 import dev.escalade.incident.IncidentDtos.CreateIncidentRequest;
+import dev.escalade.incident.IncidentDtos.DeadLetterResponse;
 import dev.escalade.incident.IncidentDtos.IncidentResponse;
 import dev.escalade.policy.EscalationStep;
 import dev.escalade.policy.PolicyRepository;
@@ -14,7 +15,7 @@ import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,14 +29,16 @@ public class IncidentService {
     private final StepRepository steps;
     private final IncidentRepository incidents;
     private final NotificationAttemptRepository attempts;
+    private final DeadLetterRepository deadLetters;
     private final IncidentWriter writer;
 
     public IncidentService(PolicyRepository policies, StepRepository steps, IncidentRepository incidents,
-            NotificationAttemptRepository attempts, IncidentWriter writer) {
+            NotificationAttemptRepository attempts, DeadLetterRepository deadLetters, IncidentWriter writer) {
         this.policies = policies;
         this.steps = steps;
         this.incidents = incidents;
         this.attempts = attempts;
+        this.deadLetters = deadLetters;
         this.writer = writer;
     }
 
@@ -89,27 +92,32 @@ public class IncidentService {
      * step the worker just scheduled. Without this the on-call would see a 500 and keep getting paged.
      */
     public IncidentResponse acknowledge(UUID orgId, UUID id) {
-        return toResponse(withRetryOnCollision(() -> writer.acknowledge(orgId, id)));
+        return toResponse(withRetryOnCollision(id, () -> writer.acknowledge(orgId, id)));
     }
 
     public IncidentResponse resolve(UUID orgId, UUID id) {
-        return toResponse(withRetryOnCollision(() -> writer.resolve(orgId, id)));
+        return toResponse(withRetryOnCollision(id, () -> writer.resolve(orgId, id)));
     }
 
-    private Incident withRetryOnCollision(Supplier<Incident> transition) {
+    private Incident withRetryOnCollision(UUID incidentId, Supplier<Incident> transition) {
         for (int attempt = 1; attempt <= MAX_TRANSITION_ATTEMPTS; attempt++) {
             try {
                 return transition.get();
-            } catch (ObjectOptimisticLockingFailureException collision) {
+            } catch (OptimisticLockingFailureException collision) {
                 log.info("incident {} was modified concurrently, retrying transition ({}/{})",
-                        id(collision), attempt, MAX_TRANSITION_ATTEMPTS);
+                        incidentId, attempt, MAX_TRANSITION_ATTEMPTS);
             }
         }
         throw new ConflictException("Incident is being modified concurrently; please retry");
     }
 
-    private static Object id(ObjectOptimisticLockingFailureException e) {
-        return e.getIdentifier() != null ? e.getIdentifier() : "unknown";
+    /** Deliveries that exhausted their retries — the failure state made queryable. */
+    @Transactional(readOnly = true)
+    public List<DeadLetterResponse> listDeadLetters(UUID orgId) {
+        return deadLetters.findByOrgId(orgId).stream()
+                .map(d -> new DeadLetterResponse(d.getId(), d.getIncidentId(),
+                        d.getNotificationAttemptId(), d.getReason(), d.getFailedAt()))
+                .toList();
     }
 
     private Incident load(UUID orgId, UUID id) {
@@ -120,7 +128,7 @@ public class IncidentService {
     private IncidentResponse toResponse(Incident i) {
         List<AttemptResponse> timeline = attempts.findByIncidentIdOrderByStepOrderAscCreatedAtAsc(i.getId()).stream()
                 .map(a -> new AttemptResponse(a.getStepOrder(), a.getChannel(), a.getTarget(), a.getStatus(),
-                        a.getAttemptCount(), a.getDueAt(), a.getSentAt()))
+                        a.getAttemptCount(), a.getDueAt(), a.getSentAt(), a.getLastError()))
                 .toList();
         return new IncidentResponse(i.getId(), i.getPolicyId(), i.getTitle(), i.getDedupKey(), i.getStatus(),
                 i.getCurrentStep(), i.getCreatedAt(), i.getAckedAt(), i.getResolvedAt(), timeline);
