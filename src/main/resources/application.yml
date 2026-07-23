@@ -49,3 +49,18 @@ escalade:
     # before it is marked DEAD_LETTERED, and how often that sweep runs.
     unacked-grace-seconds: ${ESCALADE_UNACKED_GRACE_SECONDS:300}
     sweep-interval-ms: ${ESCALADE_SWEEP_INTERVAL_MS:5000}
+
+  channels:
+    # Outbound delivery runs inside the transaction holding the attempt's row lock, so these
+    # timeouts bound how long a dead endpoint can stall an escalation. Keep them short.
+    http:
+      connect-timeout-ms: ${ESCALADE_HTTP_CONNECT_TIMEOUT_MS:3000}
+      read-timeout-ms: ${ESCALADE_HTTP_READ_TIMEOUT_MS:5000}
+
+    # Each transport activates only when its credential is present; otherwise that channel type
+    # falls back to logging. The routing actually in effect is logged at startup.
+    slack:
+      webhook-url: ${SLACK_WEBHOOK_URL:}
+    email:
+      api-key: ${RESEND_API_KEY:}
+      from: ${ESCALADE_EMAIL_FROM:Escalade <onboarding@resend.dev>}
