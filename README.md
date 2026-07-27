@@ -1,14 +1,18 @@
 # Escalade
 
+[![CI](https://github.com/akshit-khandelwal47/escalade/actions/workflows/ci.yml/badge.svg)](https://github.com/akshit-khandelwal47/escalade/actions/workflows/ci.yml)
+
 A self-hostable on-call / escalation engine — the thing that decides *who gets paged, on which
 channel, after how long, and what happens when nobody acknowledges*. Built to demonstrate the
 delivery-guarantee mechanics that make an alerting system trustworthy, not just a CRUD wrapper
 over a `notifications` table.
 
-> **Status:** Phases 0–6 complete (schema, policy + incident CRUD, idempotent dedup, API-key auth,
-> the background escalation worker with `SKIP LOCKED` job claiming, optimistic-locked
-> acknowledgement, retry/backoff with an explicit dead-letter path, and real Slack + email
-> transports). See [Roadmap](#roadmap).
+> **Status:** Feature-complete except the inbound webhook receiver — see [Roadmap](#roadmap).
+
+![Escalade demo: an incident is triggered, deduplicated, escalated through two steps, then acknowledged](docs/demo.gif)
+
+*A monitoring alert fires twice (the second is deduplicated), escalation walks the policy on its own,
+and acknowledging cancels the step that had not yet paged.*
 
 ## Why this is interesting
 
@@ -79,6 +83,116 @@ curl -s -X POST localhost:8080/api/v1/incidents \
 # 3. Fire the SAME dedupKey again — returns the same incident (HTTP 200, not 201). No duplicate page.
 ```
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Callers
+        MON[Monitoring system]
+        OC[On-call engineer]
+    end
+
+    subgraph API["Escalade API"]
+        INC["POST /incidents<br/>dedup on dedup_key"]
+        ACK["POST /incidents/:id/ack"]
+    end
+
+    subgraph DB[(PostgreSQL)]
+        I["incident<br/>status, current_step, version"]
+        NA["notification_attempt<br/>status, due_at, attempt_count"]
+        DL["dead_letter"]
+    end
+
+    subgraph W["Worker (n instances)"]
+        CLAIM["claim due attempt<br/>FOR UPDATE SKIP LOCKED"]
+        SWEEP["dead-letter sweeper"]
+    end
+
+    subgraph CH[Transports]
+        SL[Slack webhook]
+        EM[Email / Resend]
+        LOG[Logging fallback]
+    end
+
+    MON -->|trigger| INC --> I
+    INC --> NA
+    OC -->|acknowledge| ACK --> I
+
+    CLAIM -->|poll| NA
+    CLAIM -->|deliver| SL & EM & LOG
+    CLAIM -->|schedule next step| NA
+    CLAIM -->|retries exhausted| DL
+    SWEEP -->|escalation exhausted| I
+```
+
+The worker holds no state of its own: the `notification_attempt` table *is* the queue, and
+`FOR UPDATE SKIP LOCKED` is what lets several instances drain it without coordinating.
+
+### Incident lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> OPEN: trigger (idempotent on dedup_key)
+    OPEN --> OPEN: escalate to next step
+    OPEN --> ACKNOWLEDGED: ack
+    OPEN --> DEAD_LETTERED: all steps sent, grace period elapsed
+    DEAD_LETTERED --> ACKNOWLEDGED: late ack still accepted
+    ACKNOWLEDGED --> RESOLVED: resolve
+    DEAD_LETTERED --> RESOLVED: resolve
+    OPEN --> RESOLVED: resolve
+    RESOLVED --> [*]
+```
+
+`DEAD_LETTERED` is not an end state — it records that automated paging gave up, which is not the same
+as the incident being handled. Only `RESOLVED` is terminal.
+
+### The acknowledge race
+
+The case the design exists for: an ack arriving while the worker is mid-delivery.
+
+```mermaid
+sequenceDiagram
+    participant OC as On-call
+    participant API
+    participant DB as PostgreSQL
+    participant W as Worker
+
+    W->>DB: claim step 0 (SKIP LOCKED, row locked)
+    W->>W: deliver page
+    OC->>API: POST /ack
+    API->>DB: read incident (version N)
+    API-->>DB: UPDATE blocked on worker's row lock
+    W->>DB: mark SENT, schedule step 1, current_step++ (version N+1)
+    Note over W,DB: commit releases the lock
+    DB-->>API: version conflict — ack rolled back
+    API->>DB: retry: re-read (version N+1, still OPEN)
+    API->>DB: ACKNOWLEDGED + cancel pending step 1
+    Note over OC,DB: step 1 never pages
+```
+
+## Metrics
+
+Micrometer metrics are exposed on `/actuator/metrics` and in Prometheus format on
+`/actuator/prometheus`. An alerting system that cannot answer *"is it still delivering?"* has the same
+problem it exists to solve, so the counters are chosen around the failure modes:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `escalade_incidents_triggered_total` | counter | Incidents created |
+| `escalade_incidents_deduplicated_total` | counter | Triggers that matched an open incident instead of paging again |
+| `escalade_pages_sent_total{channel}` | counter | Deliveries that succeeded |
+| `escalade_pages_failed_total{channel}` | counter | Deliveries that failed (before retries are exhausted) |
+| `escalade_attempts_dead_lettered_total{channel}` | counter | Deliveries that exhausted their retries |
+| `escalade_escalations_exhausted_total` | counter | Policies that ran out of steps unacknowledged |
+| `escalade_acks_collisions_total` | counter | Acknowledgements that raced the worker and retried |
+| `escalade_incidents_open` | gauge | Incidents currently escalating |
+| `escalade_incidents_dead_lettered` | gauge | Incidents nobody acknowledged |
+| `escalade_attempts_pending` | gauge | Attempts waiting to be delivered |
+| `escalade_dead_letters` | gauge | Total dead-lettered deliveries |
+
+`escalade_pages_failed_total` rising while `escalade_pages_sent_total` stays flat is a channel outage;
+`escalade_incidents_dead_lettered` rising is a human problem, not a system one.
+
 ## Notification channels
 
 | Channel | Transport | Activates when |
@@ -112,8 +226,8 @@ because the enum value exists.
 - [x] **4** Ack-race handling — optimistic lock + concurrent test
 - [x] **5** Dead-letter path + retry/backoff
 - [x] **6** Real Slack + email channels
-- [ ] **7** Inbound webhook receiver
-- [ ] **8** Metrics, architecture diagram, demo GIF
+- [ ] **7** Inbound webhook receiver *(only remaining phase)*
+- [x] **8** Metrics, architecture diagram, demo GIF
 
 ## Design decisions worth asking about
 

@@ -6,6 +6,7 @@ import dev.escalade.incident.IncidentDtos.AttemptResponse;
 import dev.escalade.incident.IncidentDtos.CreateIncidentRequest;
 import dev.escalade.incident.IncidentDtos.DeadLetterResponse;
 import dev.escalade.incident.IncidentDtos.IncidentResponse;
+import dev.escalade.metrics.EscaladeMetrics;
 import dev.escalade.policy.EscalationStep;
 import dev.escalade.policy.PolicyRepository;
 import dev.escalade.policy.StepRepository;
@@ -31,15 +32,18 @@ public class IncidentService {
     private final NotificationAttemptRepository attempts;
     private final DeadLetterRepository deadLetters;
     private final IncidentWriter writer;
+    private final EscaladeMetrics metrics;
 
     public IncidentService(PolicyRepository policies, StepRepository steps, IncidentRepository incidents,
-            NotificationAttemptRepository attempts, DeadLetterRepository deadLetters, IncidentWriter writer) {
+            NotificationAttemptRepository attempts, DeadLetterRepository deadLetters, IncidentWriter writer,
+            EscaladeMetrics metrics) {
         this.policies = policies;
         this.steps = steps;
         this.incidents = incidents;
         this.attempts = attempts;
         this.deadLetters = deadLetters;
         this.writer = writer;
+        this.metrics = metrics;
     }
 
     /** Result of a create call: whether a new incident was created or an existing one was deduplicated. */
@@ -56,17 +60,20 @@ public class IncidentService {
 
         var existing = incidents.findByOrgIdAndDedupKeyAndStatus(orgId, req.dedupKey(), IncidentStatus.OPEN);
         if (existing.isPresent()) {
+            metrics.incidentDeduplicated();
             return new CreateResult(toResponse(existing.get()), false);
         }
 
         List<EscalationStep> policySteps = steps.findByPolicyIdOrderByStepOrder(req.policyId());
         try {
             Incident created = writer.insertIncidentWithFirstAttempt(orgId, req, policySteps);
+            metrics.incidentCreated();
             return new CreateResult(toResponse(created), true);
         } catch (DataIntegrityViolationException race) {
             // Lost the race to a concurrent create with the same dedup key — return the winner.
             Incident winner = incidents.findByOrgIdAndDedupKeyAndStatus(orgId, req.dedupKey(), IncidentStatus.OPEN)
                     .orElseThrow(() -> race);
+            metrics.incidentDeduplicated();
             return new CreateResult(toResponse(winner), false);
         }
     }
@@ -104,6 +111,7 @@ public class IncidentService {
             try {
                 return transition.get();
             } catch (OptimisticLockingFailureException collision) {
+                metrics.ackCollision();
                 log.info("incident {} was modified concurrently, retrying transition ({}/{})",
                         incidentId, attempt, MAX_TRANSITION_ATTEMPTS);
             }

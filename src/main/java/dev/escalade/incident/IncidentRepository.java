@@ -20,6 +20,8 @@ public interface IncidentRepository extends JpaRepository<Incident, UUID> {
             + "order by i.escalationExhaustedAt")
     List<Incident> findExhaustedUnacked(@Param("cutoff") Instant cutoff, Limit limit);
 
+    long countByStatus(IncidentStatus status);
+
     Optional<Incident> findByIdAndOrgId(UUID id, UUID orgId);
 
     Optional<Incident> findByOrgIdAndDedupKeyAndStatus(UUID orgId, String dedupKey, IncidentStatus status);

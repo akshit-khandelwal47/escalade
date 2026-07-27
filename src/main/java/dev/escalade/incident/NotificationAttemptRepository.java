@@ -10,6 +10,8 @@ import org.springframework.data.repository.query.Param;
 
 public interface NotificationAttemptRepository extends JpaRepository<NotificationAttempt, UUID> {
 
+    long countByStatus(AttemptStatus status);
+
     List<NotificationAttempt> findByIncidentIdOrderByStepOrderAscCreatedAtAsc(UUID incidentId);
 
     /**

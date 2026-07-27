@@ -9,6 +9,7 @@ import dev.escalade.incident.IncidentRepository;
 import dev.escalade.incident.IncidentStatus;
 import dev.escalade.incident.NotificationAttempt;
 import dev.escalade.incident.NotificationAttemptRepository;
+import dev.escalade.metrics.EscaladeMetrics;
 import dev.escalade.policy.EscalationStep;
 import dev.escalade.policy.StepRepository;
 import java.time.Instant;
@@ -38,12 +39,14 @@ public class EscalationStepProcessor {
     private final StepRepository steps;
     private final DeadLetterRepository deadLetters;
     private final NotificationDispatcher dispatcher;
+    private final EscaladeMetrics metrics;
     private final int maxAttempts;
     private final long backoffSeconds;
     private final long maxBackoffSeconds;
 
     public EscalationStepProcessor(NotificationAttemptRepository attempts, IncidentRepository incidents,
             StepRepository steps, DeadLetterRepository deadLetters, NotificationDispatcher dispatcher,
+            EscaladeMetrics metrics,
             @Value("${escalade.worker.max-attempts:3}") int maxAttempts,
             @Value("${escalade.worker.retry-backoff-seconds:30}") long backoffSeconds,
             @Value("${escalade.worker.retry-max-backoff-seconds:900}") long maxBackoffSeconds) {
@@ -52,6 +55,7 @@ public class EscalationStepProcessor {
         this.steps = steps;
         this.deadLetters = deadLetters;
         this.dispatcher = dispatcher;
+        this.metrics = metrics;
         this.maxAttempts = maxAttempts;
         this.backoffSeconds = backoffSeconds;
         this.maxBackoffSeconds = maxBackoffSeconds;
@@ -87,6 +91,7 @@ public class EscalationStepProcessor {
             attempt.setStatus(AttemptStatus.SENT);
             attempt.setSentAt(now);
             attempt.setLastError(null);
+            metrics.pageSent(attempt.getChannel());
             scheduleNextStep(incident, attempt, now);
         } catch (Exception e) {
             handleDeliveryFailure(incident, attempt, now, e);
@@ -104,6 +109,7 @@ public class EscalationStepProcessor {
     private void handleDeliveryFailure(Incident incident, NotificationAttempt attempt, Instant now, Exception e) {
         String error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
         attempt.setLastError(error);
+        metrics.pageFailed(attempt.getChannel());
 
         if (attempt.getAttemptCount() < maxAttempts) {
             attempt.setStatus(AttemptStatus.PENDING);
@@ -115,6 +121,7 @@ public class EscalationStepProcessor {
         }
 
         attempt.setStatus(AttemptStatus.FAILED);
+        metrics.attemptDeadLettered(attempt.getChannel());
         deadLetters.save(new DeadLetter(attempt.getId(), incident.getId(),
                 "Delivery failed after " + attempt.getAttemptCount() + " attempt(s): " + error));
         log.error("dead-lettered attempt {} (incident {}) after {} attempt(s): {}",
@@ -142,6 +149,7 @@ public class EscalationStepProcessor {
             // incident to DEAD_LETTERED once the grace period passes, so a late ack still works.
             if (incident.getEscalationExhaustedAt() == null) {
                 incident.setEscalationExhaustedAt(now);
+                metrics.escalationExhausted();
             }
             log.info("incident {} exhausted all {} step(s) unacknowledged",
                     incident.getId(), finished.getStepOrder() + 1);
