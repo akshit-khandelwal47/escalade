@@ -6,6 +6,7 @@ import dev.escalade.organization.Organization;
 import dev.escalade.organization.OrganizationRepository;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,19 +40,20 @@ class InboundWebhookIntegrationTest {
     @Autowired TestRestTemplate rest;
     @Autowired OrganizationRepository organizations;
 
-    private static final String API_KEY = "wh_test_key";
+    // A fresh org per test: the container is shared across methods, so a fixed key would let one
+    // test's OPEN incidents pollute another's org-scoped "?status=OPEN" counts.
+    private String apiKey;
 
     @BeforeEach
     void seedOrg() {
-        if (organizations.findByApiKey(API_KEY).isEmpty()) {
-            organizations.save(new Organization("Webhook Org", API_KEY));
-        }
+        apiKey = "wh_" + UUID.randomUUID();
+        organizations.save(new Organization("Webhook Org", apiKey));
     }
 
     private HttpHeaders auth() {
         HttpHeaders h = new HttpHeaders();
         h.setContentType(MediaType.APPLICATION_JSON);
-        h.setBearerAuth(API_KEY);
+        h.setBearerAuth(apiKey);
         return h;
     }
 
