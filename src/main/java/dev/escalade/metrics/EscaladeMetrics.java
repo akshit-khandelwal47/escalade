@@ -81,4 +81,9 @@ public class EscaladeMetrics {
     public void ackCollision() {
         registry.counter("escalade.acks.collisions").increment();
     }
+
+    /** An inbound webhook was received, tagged by source (generic, alertmanager). */
+    public void webhookReceived(String source) {
+        registry.counter("escalade.webhooks.received", "source", source).increment();
+    }
 }
