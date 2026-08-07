@@ -7,7 +7,7 @@ channel, after how long, and what happens when nobody acknowledges*. Built to de
 delivery-guarantee mechanics that make an alerting system trustworthy, not just a CRUD wrapper
 over a `notifications` table.
 
-> **Status:** Feature-complete except the inbound webhook receiver — see [Roadmap](#roadmap).
+> **Status:** Feature-complete. All roadmap phases done — see [Roadmap](#roadmap).
 
 ![Escalade demo: an incident is triggered, deduplicated, escalated through two steps, then acknowledged](docs/demo.gif)
 
@@ -62,6 +62,8 @@ All `/api/**` calls require `Authorization: Bearer <org api_key>`.
 | `POST` | `/api/v1/incidents/{id}/ack` | Acknowledge — halts escalation |
 | `POST` | `/api/v1/incidents/{id}/resolve` | Resolve |
 | `GET` | `/api/v1/dead-letters` | Deliveries that exhausted their retries |
+| `POST` | `/api/v1/webhooks/inbound?policyId=` | Generic receiver — fire an incident from any monitor |
+| `POST` | `/api/v1/webhooks/alertmanager?policyId=` | Prometheus Alertmanager receiver (firing triggers, resolved closes) |
 
 ### Example
 
@@ -170,6 +172,29 @@ sequenceDiagram
     Note over OC,DB: step 1 never pages
 ```
 
+## Inbound webhooks
+
+A monitoring system fires incidents in over `/api/v1/webhooks/*`, authenticated with the same API key
+as the rest of the API. Routing is by `policyId` in the query string — the webhook URL you configure
+in the monitor is what selects the escalation policy.
+
+- **Generic** — `POST /api/v1/webhooks/inbound?policyId=<id>` with `{"title": "...", "dedupKey": "...", "payload": {...}}`.
+  `dedupKey` is optional but recommended: a monitor that retries on timeout collapses onto the same
+  incident instead of paging twice.
+- **Prometheus Alertmanager** — `POST /api/v1/webhooks/alertmanager?policyId=<id>` accepts the native
+  Alertmanager payload. Each alert's `fingerprint` becomes the dedup key, so a `firing` alert triggers
+  an incident and the matching `resolved` alert **closes it automatically** — Escalade follows the
+  monitor's own view, and an alert that clears on its own never needs a human to acknowledge it.
+
+```bash
+# point Alertmanager at:
+#   receivers:
+#     - name: escalade
+#       webhook_configs:
+#         - url: https://escalade.example.com/api/v1/webhooks/alertmanager?policyId=<id>
+#           http_config: { authorization: { credentials: <api_key> } }
+```
+
 ## Metrics
 
 Micrometer metrics are exposed on `/actuator/metrics` and in Prometheus format on
@@ -226,7 +251,7 @@ because the enum value exists.
 - [x] **4** Ack-race handling — optimistic lock + concurrent test
 - [x] **5** Dead-letter path + retry/backoff
 - [x] **6** Real Slack + email channels
-- [ ] **7** Inbound webhook receiver *(only remaining phase)*
+- [x] **7** Inbound webhook receiver
 - [x] **8** Metrics, architecture diagram, demo GIF
 
 ## Design decisions worth asking about
