@@ -22,6 +22,13 @@ public final class WebhookDtos {
         }
     }
 
-    /** Outcome of ingesting a batch (Alertmanager posts many alerts at once). */
-    public record IngestResult(int created, int resolved, int ignored) {}
+    /**
+     * Outcome of ingesting a batch (Alertmanager posts many alerts at once).
+     *
+     * @param created      firing alerts that opened a new incident
+     * @param deduplicated firing alerts that matched an already-open incident
+     * @param resolved     resolved alerts that closed a matching open incident
+     * @param ignored      resolved alerts with nothing open to close
+     */
+    public record IngestResult(int created, int deduplicated, int resolved, int ignored) {}
 }

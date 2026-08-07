@@ -104,7 +104,8 @@ class InboundWebhookIntegrationTest {
 
         // Same fingerprint firing again deduplicates rather than opening a second incident.
         ResponseEntity<Map> again = rest.exchange(url, HttpMethod.POST, new HttpEntity<>(firing, auth()), Map.class);
-        assertThat(again.getBody().get("created")).isEqualTo(1); // create() is idempotent; still one open incident
+        assertThat(again.getBody().get("created")).isEqualTo(0);
+        assertThat(again.getBody().get("deduplicated")).isEqualTo(1);
 
         // Confirm exactly one incident is OPEN for this fingerprint.
         ResponseEntity<List> openList = rest.exchange("/api/v1/incidents?status=OPEN", HttpMethod.GET,
@@ -132,5 +133,14 @@ class InboundWebhookIntegrationTest {
                 HttpMethod.POST, new HttpEntity<>(body, auth()), Map.class);
         assertThat(res.getBody().get("resolved")).isEqualTo(0);
         assertThat(res.getBody().get("ignored")).isEqualTo(1);
+    }
+
+    @Test
+    void alertmanager_emptyOrMissingAlerts_is200_notAServerError() {
+        String policyId = createPolicy();
+        ResponseEntity<Map> res = rest.exchange("/api/v1/webhooks/alertmanager?policyId=" + policyId,
+                HttpMethod.POST, new HttpEntity<>("{}", auth()), Map.class);
+        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(res.getBody().get("created")).isEqualTo(0);
     }
 }

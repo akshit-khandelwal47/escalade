@@ -40,7 +40,12 @@ public class WebhookService {
      */
     public IngestResult ingestAlertmanager(UUID orgId, UUID policyId, AlertmanagerPayload payload) {
         metrics.webhookReceived("alertmanager");
+        if (payload == null || payload.alerts() == null || payload.alerts().isEmpty()) {
+            return new IngestResult(0, 0, 0, 0);
+        }
+
         int created = 0;
+        int deduplicated = 0;
         int resolved = 0;
         int ignored = 0;
 
@@ -55,12 +60,16 @@ public class WebhookService {
                     ignored++; // resolved for something never open here — nothing to do
                 }
             } else {
-                incidents.create(orgId, new CreateIncidentRequest(
+                var result = incidents.create(orgId, new CreateIncidentRequest(
                         policyId, titleFor(alert), dedupKey, payloadFor(alert)));
-                created++;
+                if (result.created()) {
+                    created++;
+                } else {
+                    deduplicated++; // same fingerprint already firing — no second incident
+                }
             }
         }
-        return new IngestResult(created, resolved, ignored);
+        return new IngestResult(created, deduplicated, resolved, ignored);
     }
 
     private String titleFor(Alert alert) {
